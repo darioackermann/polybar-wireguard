@@ -1,58 +1,111 @@
-#!/usr/bin/env sh
+#!/usr/bin/sh
+# WireGuard Manager - Interactive Toggle (Connect/Disconnect)
+# Default behavior: Interactive mode (toggle)
 
-# Unfortunately it's not easy to directly use Polybar colour values in this
-# script so I have to redefine some of my colours here. See the link below for
-# more details:
-# https://github.com/polybar/polybar/wiki/Formatting#format-tags-inside-polybar-config
-green=#55aa55
+# Colors (for Polybar formatting)
+green="#55aa55"
 
-configs_path="/PATH/TO/CONF/FILES"
-connected_interface=$(networkctl | grep -P "\d+ .* wireguard routable" -o | cut -d" " -f2)
+# Paths
+configs_path="/etc/wireguard"
 
+# Get connected interfaces (comma-separated)
+get_connected() {
+    networkctl | grep -P "\d+ .* wireguard routable" -o | cut -d" " -f2 |  sed ':a;N;$!ba;s/\n/, /g'
+}
+
+# Connect to a config
 connect() {
-    selected_config=$(ls $configs_path/*.conf | xargs basename -a -s .conf | dmenu)
-    [[ $selected_config ]] && sudo wg-quick up "$configs_path"/"$selected_config".conf
+    selected_config=$(ls "$configs_path"/*.conf | xargs basename -a -s .conf | dmenu -p "Connect to WG:")
+    [[ $selected_config ]] && sudo wg-quick up "$configs_path/$selected_config.conf"
 }
 
+# Disconnect a specific config
 disconnect() {
-    # Normally we should have a single connected interface but technically
-    # there's nothing stopping us from having multiple active intgerfaces so
-    # let's do this in a loop:
-    for connected_config in $(networkctl | grep -P "\d+ .* wireguard routable" -o | cut -d" " -f2)
-    do
-        sudo wg-quick down $configs_path/"$connected_config".conf
-    done
+    sudo wg-quick down "$configs_path/$1.conf"
 }
 
+# Get allowed IPs for a config
+get_allowed_ips() {
+    config_file="$configs_path/$1.conf"
+    if [ -f "$config_file" ]; then
+        allowed_ips=$(grep -P '^\s*AllowedIPs\s*=\s*' "$config_file" | head -n 1 | sed 's/^.*=\s*//;s/\s*$//')
+        echo "$allowed_ips"
+    fi
+}
+
+# Interactive toggle (default behavior)
 toggle() {
-    if [[ $connected_interface ]]
-    then
-        disconnect
-    else
-        connect
+    connected=$(get_connected)
+    IFS=', ' read -ra active_connections <<< "$connected"
+
+    # Prepare the menu options
+    menu_options=()
+    for conf in "$configs_path"/*.conf; do
+        conf_name=$(basename "$conf" .conf)
+        is_active=0
+        for active in "${active_connections[@]}"; do
+            if [[ "$conf_name" == "$active" ]]; then
+                is_active=1
+                break
+            fi
+        done
+        if [[ $is_active -eq 1 ]]; then
+            menu_options+=("✓ $conf_name")  # Active connection
+        else
+            menu_options+=("$conf_name")  # Available connection
+        fi
+    done
+
+    # Show the unified menu
+    selected=$(printf '%s\n' "${menu_options[@]}" | dmenu -p "WireGuard:")
+
+    # Process selection
+    if [[ -n "$selected" ]]; then
+        selected_config="${selected#* }"  # Remove checkmark/space prefix
+        is_currently_active=0
+        for active in "${active_connections[@]}"; do
+            if [[ "$selected_config" == "$active" ]]; then
+                is_currently_active=1
+                break
+            fi
+        done
+
+        if [[ $is_currently_active -eq 1 ]]; then
+            disconnect "$selected_config"  # Disconnect if active
+        else
+            sudo wg-quick up "$configs_path/$selected_config.conf"
+        fi
     fi
 }
-
+# Print status (for Polybar)
 print() {
-    if [[ $connected_interface ]]
-    then
-        echo %{u"$green"}%{+u}%{T4}%{F"$green"}%{T-}%{F-} "$connected_interface"
+    connected=$(get_connected)
+    if [[ $connected ]]; then
+        # Split connected interfaces
+        IFS=', ' read -ra active_connections <<< "$connected"
+        formatted_connections=()
+        for conn in "${active_connections[@]}"; do
+            allowed_ips=$(get_allowed_ips "$conn")
+            if [ -n "$allowed_ips" ]; then
+                formatted_connections+=("$conn ($allowed_ips)")
+            else
+                formatted_connections+=("$conn")
+            fi
+        done
+        # Join them back together
+        connected_str=$(printf '%s, ' "${formatted_connections[@]}" | sed 's/, $//')
+        # connected_str=$(IFS=', '; echo "${formatted_connections[*]}")
+        echo "%{u$green}%{+u}%{T4}%{F$green}%{T-}%{F-} $connected_str"
     else
-        echo %{T4}%{T-}
+        echo "%{T4}%{T-} -"
     fi
 }
 
+# Handle arguments
 case "$1" in
-    --connect)
-        connect
-        ;;
-    --disconnect)
-        disconnect
-        ;;
-    --toggle)
-        toggle
-        ;;
-    *)
-        print
-        ;;
+    --connect)      connect ;;
+    --disconnect)   disconnect ;;
+    --print)        print ;;
+    --toggle)       toggle ;; 
+    *)              print ;;
 esac
